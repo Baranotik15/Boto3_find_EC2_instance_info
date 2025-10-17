@@ -41,9 +41,19 @@ def get_instances_for_account_region(account_suffix, region, aws_access_key, aws
             aws_access_key_id=aws_access_key,
             aws_secret_access_key=aws_secret_key,
             aws_session_token=aws_token,
+            config=boto3.session.Config(
+                max_pool_connections=100,
+                retries={'max_attempts': 2, 'mode': 'adaptive'},
+                read_timeout=30,
+                connect_timeout=10
+            )
         )
 
         response = ec2.describe_instances()
+        
+        if not response.get("Reservations"):
+            return region, 0, []
+            
         region_instances = []
 
         for reservation in response["Reservations"]:
@@ -97,9 +107,7 @@ def get_all_instances_for_account(account_suffix):
         
         all_instances = []
         
-        # Use ThreadPoolExecutor for parallel region scanning
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            # Submit all region tasks
+        with ThreadPoolExecutor(max_workers=25) as executor:
             future_to_region = {
                 executor.submit(
                     get_instances_for_account_region, 
@@ -111,20 +119,18 @@ def get_all_instances_for_account(account_suffix):
                 ): region for region in regions
             }
             
-            # Process completed tasks
             for future in as_completed(future_to_region):
                 region = future_to_region[future]
                 try:
                     region_name, count, result = future.result()
                     
                     if isinstance(result, list):
-                        # Success - we got instances
                         if count > 0:
                             print(f"   [{region_name}]: {count} instances")
                             all_instances.extend(result)
                     else:
-                        # Error message
-                        print(f"   [{region_name}]: {result}")
+                        if "Access denied" not in str(result):
+                            print(f"   [{region_name}]: {result}")
                         
                 except Exception as e:
                     print(f"   [{region}]: Unexpected error: {e}")
@@ -155,16 +161,13 @@ def collect_all_instances():
 
     all_instances = []
 
-    # Use ThreadPoolExecutor for parallel account processing
     print(f"Processing {len(account_ids)} accounts in parallel...")
     with ThreadPoolExecutor(max_workers=3) as executor:
-        # Submit all account tasks
         future_to_account = {
             executor.submit(get_all_instances_for_account, account_suffix): account_suffix 
             for account_suffix in account_ids
         }
         
-        # Process completed tasks
         for future in as_completed(future_to_account):
             account_suffix = future_to_account[future]
             try:
@@ -176,7 +179,7 @@ def collect_all_instances():
 
     output_file = "instances.json"
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(all_instances, f, indent=4, ensure_ascii=False)
+        json.dump(all_instances, f, separators=(',', ':'), ensure_ascii=False)
 
     end_time = time.time()
     execution_time = end_time - start_time
