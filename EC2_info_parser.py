@@ -19,47 +19,90 @@ def load_env_file(path=".env"):
             os.environ[key.strip()] = value.strip()
 
 
-def get_all_instances_for_account(account_suffix, region="us-east-1"):
-    """Fetch all EC2 instances and their tags for one account."""
+def get_available_regions():
+    """Get list of all available AWS regions."""
     try:
-        access_key_id = f"aws_access_key_id_{account_suffix}"
-        secret_access_key = f"aws_secret_access_key_{account_suffix}"
-        session_token = f"aws_session_token_{account_suffix}"
+        ec2 = boto3.client("ec2", region_name="us-east-1")
+        response = ec2.describe_regions()
+        return [region["RegionName"] for region in response["Regions"]]
+    except Exception as e:
+        print(f"⚠️ Could not fetch regions, using default: {e}")
+        return ["us-east-1", "us-west-2", "eu-west-1", "eu-central-1", "ap-southeast-1"]
 
-        ec2 = boto3.client(
-            "ec2",
-            region_name=region,
-            aws_access_key_id=os.getenv(access_key_id),
-            aws_secret_access_key=os.getenv(secret_access_key),
-            aws_session_token=os.getenv(session_token),
-        )
 
-        response = ec2.describe_instances()
-        instances = []
+def get_all_instances_for_account(account_suffix):
+    """Fetch all EC2 instances and their tags for one account from all regions."""
+    access_key_id = f"aws_access_key_id_{account_suffix}"
+    secret_access_key = f"aws_secret_access_key_{account_suffix}"
+    session_token = f"aws_session_token_{account_suffix}"
+    
+    aws_access_key = os.getenv(access_key_id)
+    aws_secret_key = os.getenv(secret_access_key)
+    aws_token = os.getenv(session_token)
+    
+    if not aws_access_key or not aws_secret_key:
+        print(f"❌ Credentials missing for account [{account_suffix}]")
+        return []
+    
+    try:
+        regions = get_available_regions()
+        print(f"🔍 Scanning {len(regions)} regions for account [{account_suffix}]...")
+        
+        all_instances = []
+        
+        for region in regions:
+            try:
+                ec2 = boto3.client(
+                    "ec2",
+                    region_name=region,
+                    aws_access_key_id=aws_access_key,
+                    aws_secret_access_key=aws_secret_key,
+                    aws_session_token=aws_token,
+                )
 
-        for reservation in response["Reservations"]:
-            for instance in reservation["Instances"]:
-                tags = {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
-                instance_data = {
-                    "Account": account_suffix,
-                    "InstanceId": instance["InstanceId"],
-                    "InstanceType": instance.get("InstanceType", "N/A"),
-                    "State": instance["State"]["Name"],
-                    "PrivateIpAddress": instance.get("PrivateIpAddress", "N/A"),
-                    "PublicIpAddress": instance.get("PublicIpAddress", "N/A"),
-                    "Tags": tags,
-                }
-                instances.append(instance_data)
+                response = ec2.describe_instances()
+                region_instances = []
 
-        print(f"✅ Found {len(instances)} instances in account [{account_suffix}]")
-        return instances
+                for reservation in response["Reservations"]:
+                    for instance in reservation["Instances"]:
+                        tags = {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
+                        instance_data = {
+                            "Account": account_suffix,
+                            "Region": region,
+                            "InstanceId": instance["InstanceId"],
+                            "InstanceType": instance.get("InstanceType", "N/A"),
+                            "State": instance["State"]["Name"],
+                            "PrivateIpAddress": instance.get("PrivateIpAddress", "N/A"),
+                            "PublicIpAddress": instance.get("PublicIpAddress", "N/A"),
+                            "Tags": tags,
+                        }
+                        region_instances.append(instance_data)
 
-    except ClientError as e:
-        print(f"❌ AWS client error in account [{account_suffix}]: {e.response['Error']['Message']}")
+                if region_instances:
+                    print(f"   📍 [{region}]: {len(region_instances)} instances")
+                    all_instances.extend(region_instances)
+                    
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                if error_code in ['UnauthorizedOperation', 'AccessDenied']:
+                    print(f"   ⚠️ [{region}]: Access denied")
+                elif error_code == 'OptInRequired':
+                    print(f"   ⚠️ [{region}]: Opt-in required")
+                else:
+                    print(f"   ⚠️ [{region}]: {e.response['Error']['Message']}")
+                continue
+            except EndpointConnectionError:
+                print(f"   ⚠️ [{region}]: Could not connect to endpoint")
+                continue
+            except Exception as e:
+                print(f"   ⚠️ [{region}]: {str(e)}")
+                continue
+
+        print(f"✅ Found {len(all_instances)} total instances in account [{account_suffix}]")
+        return all_instances
+
     except NoCredentialsError:
         print(f"❌ Credentials missing for account [{account_suffix}]")
-    except EndpointConnectionError:
-        print(f"❌ Could not connect to AWS endpoint for account [{account_suffix}]")
     except Exception as e:
         print(f"❌ Unexpected error in account [{account_suffix}]: {e}")
 
